@@ -1,0 +1,27 @@
+{
+  "name": "codex-telegram-bridge",
+  "version": "0.1.0",
+  "description": "Telegram bridge for local Codex CLI conversations.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "install:codex": "npm run build && node scripts/install-codex.mjs",
+    "start:mcp": "node dist/mcp.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "grammy": "^1.42.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.15"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
