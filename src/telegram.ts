@@ -469,6 +469,9 @@ export class TelegramBridge {
     const chatId = ctx.chat?.id;
     if (!chatId) return Promise.resolve();
     const queue = this.queues.get(chatId) || { tail: Promise.resolve(), pending: 0 };
+    if (queue.pending > 0) {
+      void ctx.reply(`Queued. ${queue.pending} request(s) ahead of this one.`);
+    }
     queue.pending += 1;
     const run = queue.tail
       .catch(() => undefined)

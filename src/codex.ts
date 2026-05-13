@@ -5,6 +5,7 @@ import path from "node:path";
 import type { CodexRunResult } from "./types.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const defaultCodexTimeoutMs = 180_000;
 
 export interface CodexClientOptions {
   codexCommand: string;
@@ -37,6 +38,7 @@ export interface CodexStreamEvent {
 export interface CodexRunOptions {
   onEvent?: (event: CodexStreamEvent) => void | Promise<void>;
   imagePaths?: string[];
+  timeoutMs?: number;
 }
 
 export class CodexError extends Error {
@@ -106,7 +108,8 @@ export class CodexClient {
         [...(this.options.codexBaseArgs || []), ...args],
         prompt,
         this.options.defaultWorkspace,
-        options.onEvent
+        options.onEvent,
+        options.timeoutMs
       );
       const finalMessage = await readFinalMessage(outputPath, stdout);
       const sessionId =
@@ -169,7 +172,8 @@ function spawnCodex(
   args: string[],
   stdin: string,
   cwd: string,
-  onEvent?: (event: CodexStreamEvent) => void | Promise<void>
+  onEvent?: (event: CodexStreamEvent) => void | Promise<void>,
+  timeoutMs = defaultCodexTimeoutMs
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -182,6 +186,11 @@ function spawnCodex(
     let stdout = "";
     let stderr = "";
     let bufferedLine = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      stderr += `\nCodex CLI timed out after ${Math.round(timeoutMs / 1000)} seconds.`;
+      killProcessTree(child.pid);
+    }, timeoutMs);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
@@ -191,8 +200,16 @@ function spawnCodex(
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
       if (bufferedLine.trim()) {
         emitJsonlEvent(bufferedLine.trim(), onEvent);
       }
@@ -200,6 +217,20 @@ function spawnCodex(
     });
     child.stdin.end(stdin);
   });
+}
+
+function killProcessTree(pid: number | undefined): void {
+  if (!pid) return;
+  if (process.platform === "win32") {
+    const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true });
+    killer.on("error", () => undefined);
+    return;
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Process already exited.
+  }
 }
 
 function consumeJsonlChunk(text: string, onEvent?: (event: CodexStreamEvent) => void | Promise<void>): string {
