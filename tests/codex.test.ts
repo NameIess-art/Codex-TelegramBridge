@@ -43,6 +43,15 @@ describe("codex helpers", () => {
         })
       )
     ).toEqual({ kind: "message", text: "Done" });
+
+    expect(
+      parseCodexStreamEvent(
+        JSON.stringify({
+          type: "item.completed",
+          item: { id: "item_0", type: "agent_message", text: "Done from exec" }
+        })
+      )
+    ).toEqual({ kind: "message", text: "Done from exec" });
   });
 
   it("parses processed tool calls and outputs", () => {

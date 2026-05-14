@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCommandArgument, probeCodexNetwork, splitTelegramMessage } from "../src/telegram.js";
+import { createAnswerRevealFrames, parseCommandArgument, probeCodexNetwork, splitTelegramMessage } from "../src/telegram.js";
 
 describe("telegram helpers", () => {
   it("splits long Telegram messages", () => {
@@ -24,5 +24,10 @@ describe("telegram helpers", () => {
       throw new Error("tls handshake eof");
     };
     await expect(probeCodexNetwork(fetchImpl as typeof fetch)).resolves.toBe(false);
+  });
+
+  it("creates incremental answer reveal frames", () => {
+    expect(createAnswerRevealFrames("", "one two three", 10)).toEqual(["one ", "one two ", "one two three"]);
+    expect(createAnswerRevealFrames("one ", "one two three", 10)).toEqual(["one two ", "one two three"]);
   });
 });

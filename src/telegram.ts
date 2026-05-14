@@ -19,6 +19,8 @@ const safeChunkSize = 3900;
 const codexNetworkProbeUrl = "https://chatgpt.com/backend-api/codex/responses";
 const networkFailureCooldownMs = 60_000;
 const networkSuccessCacheMs = 30_000;
+const answerRevealIntervalMs = 260;
+const maxAnswerRevealSteps = 160;
 
 export interface TelegramBridgeOptions {
   configStore: ConfigStore;
@@ -753,10 +755,12 @@ class TelegramStream {
   private reasoning = "";
   private processed = "";
   private answer = "";
+  private answerTarget = "";
   private status = "";
   private lastText = "";
   private lastFlushAt = 0;
   private messageId?: number;
+  private animationTail: Promise<void> = Promise.resolve();
 
   private constructor(
     private readonly ctx: Context,
@@ -779,7 +783,8 @@ class TelegramStream {
     } else if (event.kind === "processed") {
       this.processed = appendDistinct(this.processed, event.text);
     } else if (event.kind === "message") {
-      this.answer = appendDistinct(this.answer, event.text);
+      await this.revealAnswer(event.text);
+      return;
     } else {
       this.status = event.text;
     }
@@ -787,8 +792,12 @@ class TelegramStream {
   }
 
   async complete(finalMessage: string): Promise<void> {
+    const target = finalMessage || this.answerTarget || this.answer;
+    if (target) {
+      this.status = "Streaming";
+      await this.revealAnswer(target);
+    }
     this.status = "Done";
-    this.answer = finalMessage || this.answer;
     await this.flush(true);
   }
 
@@ -798,7 +807,7 @@ class TelegramStream {
     await this.flush(true);
   }
 
-  private async flush(force: boolean): Promise<void> {
+  private async flush(force: boolean, fallbackOnEditFailure = force): Promise<void> {
     const now = Date.now();
     if (!force && now - this.lastFlushAt < 1200) return;
     const text = renderStreamMessage({
@@ -816,10 +825,34 @@ class TelegramStream {
       return;
     }
     await this.ctx.api.editMessageText(this.chatId, this.messageId, text, { parse_mode: "HTML" }).catch(async () => {
-      if (force) {
+      if (fallbackOnEditFailure) {
         await replyLong(this.ctx, text, { parse_mode: "HTML" });
       }
     });
+  }
+
+  private async revealAnswer(text: string): Promise<void> {
+    const target = mergeAnswerTarget(this.answerTarget || this.answer, text);
+    if (!target) return;
+    if (target === this.answerTarget) {
+      await this.animationTail;
+      return;
+    }
+    this.answerTarget = target;
+
+    const animate = async () => {
+      if (!this.answerTarget || this.answer === this.answerTarget) return;
+      for (const nextAnswer of createAnswerRevealFrames(this.answer, this.answerTarget)) {
+        this.answer = nextAnswer;
+        await this.flush(true, false);
+        if (this.answer !== this.answerTarget) {
+          await delay(answerRevealIntervalMs);
+        }
+      }
+    };
+
+    this.animationTail = this.animationTail.then(animate, animate);
+    await this.animationTail;
   }
 }
 
@@ -854,6 +887,49 @@ function appendDistinct(existing: string, next: string): string {
   if (!existing) return normalized;
   if (existing.includes(normalized)) return existing;
   return `${existing}\n${normalized}`;
+}
+
+function mergeAnswerTarget(existing: string, next: string): string {
+  const normalized = next.trim();
+  if (!normalized) return existing;
+  if (!existing) return normalized;
+  if (normalized.startsWith(existing)) return normalized;
+  if (existing.includes(normalized)) return existing;
+  return `${existing}\n${normalized}`;
+}
+
+export function createAnswerRevealFrames(current: string, target: string, maxSteps = maxAnswerRevealSteps): string[] {
+  if (!target || target === current) return [];
+  if (!target.startsWith(current)) {
+    current = "";
+  }
+
+  const remainder = target.slice(current.length);
+  const units = splitRevealUnits(remainder);
+  if (units.length === 0) return [];
+
+  const stepSize = Math.max(1, Math.ceil(units.length / maxSteps));
+  const frames: string[] = [];
+  let next = current;
+  for (let index = 0; index < units.length; index += stepSize) {
+    next += units.slice(index, index + stepSize).join("");
+    frames.push(next);
+  }
+  if (frames[frames.length - 1] !== target) {
+    frames.push(target);
+  }
+  return frames;
+}
+
+function splitRevealUnits(text: string): string[] {
+  if (/\s/.test(text)) {
+    return text.match(/\S+\s*/g) || [];
+  }
+  return Array.from(text);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function truncateForStream(text: string, maxChars: number): string {

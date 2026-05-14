@@ -282,6 +282,14 @@ export function parseCodexStreamEvent(line: string): CodexStreamEvent | undefine
     return output ? { kind: "processed", text: output } : undefined;
   }
 
+  const completedItem = objectEvent.type === "item.completed" ? (objectEvent.item as Record<string, unknown> | undefined) : undefined;
+  if (completedItem?.type === "agent_message" && typeof completedItem.text === "string") {
+    return completedItem.text ? { kind: "message", text: completedItem.text } : undefined;
+  }
+  if (completedItem?.type === "reasoning" && typeof completedItem.text === "string") {
+    return completedItem.text ? { kind: "reasoning", text: completedItem.text } : undefined;
+  }
+
   const eventMsg = objectEvent.type === "event_msg" ? (objectEvent.payload as Record<string, unknown> | undefined) : undefined;
   if (eventMsg?.type === "agent_message" && typeof eventMsg.message === "string") {
     return { kind: "message", text: eventMsg.message };
