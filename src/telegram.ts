@@ -224,16 +224,22 @@ export class TelegramBridge {
       await ctx.reply("Usage: /switch <id|name>");
       return;
     }
+    const codexSession = await findListedCodexSession(query);
+    if (codexSession) {
+      const next = await this.setCurrentFromCodexSession(codexSession);
+      await ctx.reply(`Switched to "${next.name}".`);
+      return;
+    }
+
+    if (isListIndexQuery(query)) {
+      await ctx.reply("Session not found. Use /list to see available sessions.");
+      return;
+    }
+
     const state = await this.options.stateStore.read();
     const session = findSession(state, query);
     if (!session) {
-      const codexSession = await findListedCodexSession(query);
-      if (!codexSession) {
-        await ctx.reply("Session not found. Use /list to see available sessions.");
-        return;
-      }
-      const next = await this.setCurrentFromCodexSession(codexSession);
-      await ctx.reply(`Switched to "${next.name}".`);
+      await ctx.reply("Session not found. Use /list to see available sessions.");
       return;
     }
     await this.options.stateStore.write({ ...state, currentSessionKey: session.key });
@@ -643,8 +649,14 @@ function getCurrentSession(state: BridgeState): BridgeSession | undefined {
 function findSession(state: BridgeState, query: string): BridgeSession | undefined {
   const normalized = query.toLowerCase();
   return Object.values(state.sessions).find(
-    (session) => session.key === query || session.key.startsWith(query) || session.name.toLowerCase() === normalized
+    (session) =>
+      session.key === query || (!isListIndexQuery(query) && session.key.startsWith(query)) || session.name.toLowerCase() === normalized
   );
+}
+
+export function isListIndexQuery(query: string): boolean {
+  const normalized = query.trim();
+  return /^\d+$/.test(normalized) && Number(normalized) > 0;
 }
 
 async function replyLong(ctx: Context, text: string, options?: Parameters<Context["reply"]>[1]): Promise<void> {
@@ -726,8 +738,7 @@ async function findListedCodexSession(query: string): Promise<CodexSessionMeta |
   const trimmed = query.trim();
   const workspaces = await listCodexWorkspaceSessions();
   const flattened = workspaces.flatMap((workspace) => workspace.sessions);
-  const asIndex = Number(trimmed);
-  if (Number.isInteger(asIndex) && asIndex > 0) return flattened[asIndex - 1];
+  if (isListIndexQuery(trimmed)) return flattened[Number(trimmed) - 1];
 
   const normalized = trimmed.toLowerCase();
   return flattened.find(

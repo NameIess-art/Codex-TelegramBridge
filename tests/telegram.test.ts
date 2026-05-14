@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAnswerRevealFrames, parseCommandArgument, probeCodexNetwork, splitTelegramMessage } from "../src/telegram.js";
+import { createAnswerRevealFrames, isListIndexQuery, parseCommandArgument, probeCodexNetwork, splitTelegramMessage } from "../src/telegram.js";
 
 describe("telegram helpers", () => {
   it("splits long Telegram messages", () => {
@@ -12,6 +12,13 @@ describe("telegram helpers", () => {
   it("parses command arguments", () => {
     expect(parseCommandArgument("/new project notes")).toBe("project notes");
     expect(parseCommandArgument("/new")).toBe("");
+  });
+
+  it("detects /list numeric switch indexes", () => {
+    expect(isListIndexQuery("1")).toBe(true);
+    expect(isListIndexQuery(" 25 ")).toBe(true);
+    expect(isListIndexQuery("0")).toBe(false);
+    expect(isListIndexQuery("1abc")).toBe(false);
   });
 
   it("treats any HTTP response as reachable Codex network", async () => {
