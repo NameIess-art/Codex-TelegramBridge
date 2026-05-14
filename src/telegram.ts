@@ -21,8 +21,9 @@ const safeChunkSize = 3900;
 const codexNetworkProbeUrl = "https://chatgpt.com/backend-api/codex/responses";
 const networkFailureCooldownMs = 60_000;
 const networkSuccessCacheMs = 30_000;
-const answerRevealIntervalMs = 80;
-const maxAnswerRevealSteps = 70;
+const streamFlushIntervalMs = 500;
+const answerRevealIntervalMs = 10;
+const maxAnswerRevealSteps = 12;
 
 export interface TelegramBridgeOptions {
   configStore: ConfigStore;
@@ -840,7 +841,7 @@ class TelegramStream {
 
   private async flush(force: boolean, fallbackOnEditFailure = force): Promise<void> {
     const now = Date.now();
-    if (!force && now - this.lastFlushAt < 1200) return;
+    if (!force && now - this.lastFlushAt < streamFlushIntervalMs) return;
     const text = renderStreamMessage({
       status: this.status,
       reasoning: this.reasoning,
@@ -874,10 +875,15 @@ class TelegramStream {
     const animate = async () => {
       if (!this.answerTarget || this.answer === this.answerTarget) return;
       for (const nextAnswer of createAnswerRevealFrames(this.answer, this.answerTarget)) {
+        const startedAt = Date.now();
         this.answer = nextAnswer;
         await this.flush(true, false);
         if (this.answer !== this.answerTarget) {
-          await delay(answerRevealIntervalMs);
+          const elapsed = Date.now() - startedAt;
+          const remainingDelay = answerRevealIntervalMs - elapsed;
+          if (remainingDelay > 0) {
+            await delay(remainingDelay);
+          }
         }
       }
     };
