@@ -19,8 +19,8 @@ const safeChunkSize = 3900;
 const codexNetworkProbeUrl = "https://chatgpt.com/backend-api/codex/responses";
 const networkFailureCooldownMs = 60_000;
 const networkSuccessCacheMs = 30_000;
-const answerRevealIntervalMs = 260;
-const maxAnswerRevealSteps = 160;
+const answerRevealIntervalMs = 80;
+const maxAnswerRevealSteps = 70;
 
 export interface TelegramBridgeOptions {
   configStore: ConfigStore;
