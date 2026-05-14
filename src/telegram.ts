@@ -158,19 +158,14 @@ export class TelegramBridge {
     await withTyping(ctx, async () => {
       const config = await this.options.configStore.read();
       const codex = this.options.codexFactory(config.codexCommand, target.workspace);
-      const stream = await TelegramStream.create(ctx);
-      const result = await runCodexWithStream(
-        stream,
-        () =>
-          codex.runNewSession(
-            `Start a new Codex Telegram Bridge conversation in workspace "${target.workspace}". Reply briefly that the session is ready.`,
-            {
-              onEvent: (event) => stream.push(event)
-            }
-          ),
-        (error) => this.noteCodexFailure(error)
-      );
-      if (!result) return;
+      let result: CodexRunResult;
+      try {
+        result = await codex.runNewSession(newSessionInitializationPrompt());
+      } catch (error) {
+        this.noteCodexFailure(error);
+        await ctx.reply(`Could not create a new Codex conversation:\n${formatCodexRequestError(error).slice(0, 3500)}`);
+        return;
+      }
       await recordCodexSessionIndex(result.sessionId, "New conversation");
       await this.options.stateStore.update((state) => {
         const current = state.sessions[session.key] || session;
@@ -181,9 +176,7 @@ export class TelegramBridge {
           sessions: { ...state.sessions, [session.key]: updated }
         };
       });
-      await stream.complete(
-        result.finalMessage || `New session is ready${target.matchedWorkspace ? ` in ${target.matchedWorkspace}` : ""}.`
-      );
+      await ctx.reply(`New conversation created in ${target.matchedWorkspace || path.basename(target.workspace) || target.workspace}.`);
     });
   }
 
@@ -626,6 +619,10 @@ function titleFromPrompt(prompt: string, fallback = "New conversation"): string 
 
 function replacePlaceholderName(currentName: string, nextName: string): string {
   return ["New conversation", "Untitled", "default"].includes(currentName) ? nextName : currentName;
+}
+
+function newSessionInitializationPrompt(): string {
+  return "Initialize a blank remote Codex conversation. Do not inspect files or run commands. Reply exactly: Ready.";
 }
 
 async function recordCodexSessionIndex(sessionId: string | undefined, title: string): Promise<void> {
