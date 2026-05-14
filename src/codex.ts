@@ -537,6 +537,23 @@ export async function upsertCodexSessionIndex(
   await fs.rename(tempPath, indexPath);
 }
 
+export async function syncCodexDesktopThread(
+  sessionId: string | undefined,
+  threadName: string | undefined,
+  workspace: string | undefined,
+  codexHome?: string,
+  updatedAtMs = Date.now()
+): Promise<void> {
+  const id = sessionId?.trim();
+  const title = sanitizeTitle(threadName);
+  if (!id || !uuidPattern.test(id) || !title) return;
+
+  await Promise.all([
+    updateCodexStateThread(id, title, workspace, codexHome, updatedAtMs),
+    updateSessionMetaSource(id, workspace, codexHome)
+  ]);
+}
+
 export async function backfillCodexSessionIndex(codexHome?: string): Promise<number> {
   const sessions = await listCodexSessions(codexHome);
   let count = 0;
@@ -545,6 +562,101 @@ export async function backfillCodexSessionIndex(codexHome?: string): Promise<num
     count += 1;
   }
   return count;
+}
+
+export async function backfillCodexDesktopThreads(codexHome?: string): Promise<number> {
+  const sessions = await listCodexSessions(codexHome);
+  let count = 0;
+  for (const session of sessions) {
+    await syncCodexDesktopThread(session.id, session.title, session.cwd, codexHome, session.mtimeMs);
+    count += 1;
+  }
+  return count;
+}
+
+async function updateCodexStateThread(
+  sessionId: string,
+  title: string,
+  workspace: string | undefined,
+  codexHome: string | undefined,
+  updatedAtMs: number
+): Promise<void> {
+  const home = codexHome || path.join(os.homedir(), ".codex");
+  const dbPath = path.join(home, "state_5.sqlite");
+  const exists = await fs
+    .stat(dbPath)
+    .then((stats) => stats.isFile())
+    .catch(() => false);
+  if (!exists) return;
+
+  const updatedAt = Math.floor(updatedAtMs / 1000);
+  const desktopCwd = workspace ? toDesktopWorkspacePath(workspace) : undefined;
+  const assignments = [
+    "source = 'vscode'",
+    `title = ${sqlString(title)}`,
+    `first_user_message = CASE WHEN trim(first_user_message) = '' OR source = 'exec' THEN ${sqlString(title)} ELSE first_user_message END`,
+    `updated_at = ${updatedAt}`,
+    `updated_at_ms = ${Math.floor(updatedAtMs)}`
+  ];
+  if (desktopCwd) {
+    assignments.push(`cwd = ${sqlString(desktopCwd)}`);
+  }
+
+  const sql = `UPDATE threads SET ${assignments.join(", ")} WHERE id = ${sqlString(sessionId)};`;
+  await runSqlite(dbPath, sql).catch(() => undefined);
+}
+
+async function updateSessionMetaSource(sessionId: string, workspace: string | undefined, codexHome: string | undefined): Promise<void> {
+  const session = (await listCodexSessions(codexHome)).find((candidate) => candidate.id === sessionId);
+  if (!session) return;
+
+  const raw = await fs.readFile(session.filePath, "utf8").catch(() => undefined);
+  if (!raw) return;
+  const newlineIndex = raw.search(/\r?\n/);
+  const firstLine = newlineIndex === -1 ? raw : raw.slice(0, newlineIndex);
+  const rest = newlineIndex === -1 ? "" : raw.slice(newlineIndex);
+  try {
+    const event = JSON.parse(firstLine) as { type?: string; payload?: Record<string, unknown> };
+    if (event.type !== "session_meta" || !event.payload) return;
+    event.payload.source = "vscode";
+    if (workspace) event.payload.cwd = workspace;
+    const next = `${JSON.stringify(event)}${rest}`;
+    if (next === raw) return;
+    const tempPath = `${session.filePath}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(tempPath, next, "utf8");
+    await fs.rename(tempPath, session.filePath);
+  } catch {
+    return;
+  }
+}
+
+function toDesktopWorkspacePath(workspace: string): string {
+  const resolved = path.resolve(workspace);
+  if (process.platform !== "win32") return resolved;
+  return resolved.startsWith("\\\\?\\") ? resolved : `\\\\?\\${resolved}`;
+}
+
+function sqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function runSqlite(dbPath: string, sql: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("sqlite3", [dbPath, sql], { windowsHide: true });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(stderr.trim() || `sqlite3 exited with code ${code}`));
+      }
+    });
+  });
 }
 
 function mergeSessionIndexEntry(

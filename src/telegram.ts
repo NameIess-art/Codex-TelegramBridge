@@ -6,6 +6,7 @@ import {
   findLatestCodexSession,
   isTransientCodexNetworkError,
   listCodexWorkspaceSessions,
+  syncCodexDesktopThread,
   upsertCodexSessionIndex,
   type CodexSessionMeta,
   type CodexStreamEvent
@@ -166,7 +167,7 @@ export class TelegramBridge {
         await ctx.reply(`Could not create a new Codex conversation:\n${formatCodexRequestError(error).slice(0, 3500)}`);
         return;
       }
-      await recordCodexSessionIndex(result.sessionId, "New conversation");
+      await recordCodexSessionIndex(result.sessionId, "New conversation", target.workspace);
       await this.options.stateStore.update((state) => {
         const current = state.sessions[session.key] || session;
         const updated = touchSession({ ...current, codexSessionId: result.sessionId || current.codexSessionId });
@@ -315,7 +316,7 @@ export class TelegramBridge {
         (error) => this.noteCodexFailure(error)
       );
       if (!result) return;
-      await recordCodexSessionIndex(result.sessionId || current.codexSessionId, indexTitle);
+      await recordCodexSessionIndex(result.sessionId || current.codexSessionId, indexTitle, current.workspace || config.defaultWorkspace);
 
       await this.options.stateStore.update((latest) => {
         const latestCurrent = latest.sessions[current.key] || current;
@@ -382,7 +383,7 @@ export class TelegramBridge {
         );
         if (!result) return;
         const indexTitle = titleFromPrompt(prompt, "Image conversation");
-        await recordCodexSessionIndex(result.sessionId || current.codexSessionId, indexTitle);
+        await recordCodexSessionIndex(result.sessionId || current.codexSessionId, indexTitle, current.workspace || config.defaultWorkspace);
 
         await this.options.stateStore.update((latest) => {
           const latestCurrent = latest.sessions[current.key] || current;
@@ -625,9 +626,12 @@ function newSessionInitializationPrompt(): string {
   return "Initialize a blank remote Codex conversation. Do not inspect files or run commands. Reply exactly: Ready.";
 }
 
-async function recordCodexSessionIndex(sessionId: string | undefined, title: string): Promise<void> {
+async function recordCodexSessionIndex(sessionId: string | undefined, title: string, workspace?: string): Promise<void> {
   await upsertCodexSessionIndex(sessionId, title).catch((error) => {
     console.error("Failed to update Codex session index:", error);
+  });
+  await syncCodexDesktopThread(sessionId, title, workspace).catch((error) => {
+    console.error("Failed to sync Codex desktop thread:", error);
   });
 }
 
