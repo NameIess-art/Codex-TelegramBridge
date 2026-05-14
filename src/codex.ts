@@ -30,6 +30,13 @@ export interface CodexWorkspaceSessions {
   latestMtimeMs: number;
 }
 
+export interface CodexSessionIndexEntry {
+  id: string;
+  thread_name: string;
+  updated_at: string;
+  [key: string]: unknown;
+}
+
 export interface CodexStreamEvent {
   kind: "reasoning" | "message" | "processed" | "status";
   text: string;
@@ -486,6 +493,78 @@ export async function listCodexSessions(codexHome?: string, minMtimeMs = 0): Pro
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return candidates;
+}
+
+export async function upsertCodexSessionIndex(
+  sessionId: string | undefined,
+  threadName: string | undefined,
+  codexHome?: string,
+  updatedAt = new Date().toISOString()
+): Promise<void> {
+  const id = sessionId?.trim();
+  const title = sanitizeTitle(threadName);
+  if (!id || !title) return;
+
+  const home = codexHome || path.join(os.homedir(), ".codex");
+  const indexPath = path.join(home, "session_index.jsonl");
+  await fs.mkdir(home, { recursive: true });
+  const raw = await fs.readFile(indexPath, "utf8").catch(() => "");
+  const nextLines: string[] = [];
+  let found = false;
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const entry = JSON.parse(trimmed) as Partial<CodexSessionIndexEntry>;
+      if (entry.id === id) {
+        found = true;
+        nextLines.push(JSON.stringify(mergeSessionIndexEntry(entry, title, updatedAt)));
+      } else {
+        nextLines.push(trimmed);
+      }
+    } catch {
+      nextLines.push(line);
+    }
+  }
+
+  if (!found) {
+    nextLines.push(JSON.stringify({ id, thread_name: title, updated_at: updatedAt }));
+  }
+
+  const tempPath = `${indexPath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tempPath, `${nextLines.join("\n")}\n`, "utf8");
+  await fs.rename(tempPath, indexPath);
+}
+
+export async function backfillCodexSessionIndex(codexHome?: string): Promise<number> {
+  const sessions = await listCodexSessions(codexHome);
+  let count = 0;
+  for (const session of sessions) {
+    await upsertCodexSessionIndex(session.id, session.title, codexHome, session.timestamp || new Date(session.mtimeMs).toISOString());
+    count += 1;
+  }
+  return count;
+}
+
+function mergeSessionIndexEntry(
+  entry: Partial<CodexSessionIndexEntry>,
+  fallbackTitle: string,
+  updatedAt: string
+): CodexSessionIndexEntry {
+  const existingTitle = typeof entry.thread_name === "string" ? entry.thread_name.trim() : "";
+  const threadName = shouldReplaceSessionIndexTitle(existingTitle) ? fallbackTitle : existingTitle;
+  return {
+    ...entry,
+    id: String(entry.id),
+    thread_name: threadName,
+    updated_at: updatedAt
+  };
+}
+
+function shouldReplaceSessionIndexTitle(title: string): boolean {
+  if (!title) return true;
+  return ["New conversation", "Untitled", "default"].includes(title);
 }
 
 async function readSessionTitleIndex(codexHome: string): Promise<Map<string, string>> {

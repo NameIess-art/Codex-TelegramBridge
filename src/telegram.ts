@@ -6,6 +6,7 @@ import {
   findLatestCodexSession,
   isTransientCodexNetworkError,
   listCodexWorkspaceSessions,
+  upsertCodexSessionIndex,
   type CodexSessionMeta,
   type CodexStreamEvent
 } from "./codex.js";
@@ -170,6 +171,7 @@ export class TelegramBridge {
         (error) => this.noteCodexFailure(error)
       );
       if (!result) return;
+      await recordCodexSessionIndex(result.sessionId, "New conversation");
       await this.options.stateStore.update((state) => {
         const current = state.sessions[session.key] || session;
         const updated = touchSession({ ...current, codexSessionId: result.sessionId || current.codexSessionId });
@@ -310,6 +312,7 @@ export class TelegramBridge {
       const codex = this.options.codexFactory(config.codexCommand, current.workspace || config.defaultWorkspace);
 
       const stream = await TelegramStream.create(ctx);
+      const indexTitle = titleFromPrompt(prompt);
       const result = await runCodexWithStream(
         stream,
         () =>
@@ -319,10 +322,15 @@ export class TelegramBridge {
         (error) => this.noteCodexFailure(error)
       );
       if (!result) return;
+      await recordCodexSessionIndex(result.sessionId || current.codexSessionId, indexTitle);
 
       await this.options.stateStore.update((latest) => {
         const latestCurrent = latest.sessions[current.key] || current;
-        const updated = touchSession({ ...latestCurrent, codexSessionId: result.sessionId || latestCurrent.codexSessionId });
+        const updated = touchSession({
+          ...latestCurrent,
+          name: replacePlaceholderName(latestCurrent.name, indexTitle),
+          codexSessionId: result.sessionId || latestCurrent.codexSessionId
+        });
         return {
           ...latest,
           currentSessionKey: updated.key,
@@ -380,10 +388,16 @@ export class TelegramBridge {
           (error) => this.noteCodexFailure(error)
         );
         if (!result) return;
+        const indexTitle = titleFromPrompt(prompt, "Image conversation");
+        await recordCodexSessionIndex(result.sessionId || current.codexSessionId, indexTitle);
 
         await this.options.stateStore.update((latest) => {
           const latestCurrent = latest.sessions[current.key] || current;
-          const updated = touchSession({ ...latestCurrent, codexSessionId: result.sessionId || latestCurrent.codexSessionId });
+          const updated = touchSession({
+            ...latestCurrent,
+            name: replacePlaceholderName(latestCurrent.name, indexTitle),
+            codexSessionId: result.sessionId || latestCurrent.codexSessionId
+          });
           return {
             ...latest,
             currentSessionKey: updated.key,
@@ -602,6 +616,22 @@ function createSession(name: string, codexSessionId?: string, createdAt?: string
 
 function touchSession(session: BridgeSession): BridgeSession {
   return { ...session, updatedAt: new Date().toISOString() };
+}
+
+function titleFromPrompt(prompt: string, fallback = "New conversation"): string {
+  const normalized = prompt.replace(/\s+/g, " ").trim();
+  if (!normalized) return fallback;
+  return normalized.length > 42 ? `${normalized.slice(0, 40)}...` : normalized;
+}
+
+function replacePlaceholderName(currentName: string, nextName: string): string {
+  return ["New conversation", "Untitled", "default"].includes(currentName) ? nextName : currentName;
+}
+
+async function recordCodexSessionIndex(sessionId: string | undefined, title: string): Promise<void> {
+  await upsertCodexSessionIndex(sessionId, title).catch((error) => {
+    console.error("Failed to update Codex session index:", error);
+  });
 }
 
 function getCurrentSession(state: BridgeState): BridgeSession | undefined {

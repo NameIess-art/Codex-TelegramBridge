@@ -9,7 +9,8 @@
     "build": "npm run clean && tsc -p tsconfig.json",
     "test": "vitest run",
     "install:codex": "npm run build && node scripts/install-codex.mjs",
-    "start:mcp": "node dist/mcp.js"
+    "start:mcp": "node dist/mcp.js",
+    "start:bot": "node dist/daemon.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
