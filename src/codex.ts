@@ -151,7 +151,7 @@ function hasStartedTurn(stdout: string): boolean {
   return /"type"\s*:\s*"turn\.started"|"type"\s*:\s*"thread\.started"/.test(stdout);
 }
 
-function isTransientCodexNetworkError(text: string): boolean {
+export function isTransientCodexNetworkError(text: string): boolean {
   return /tls handshake eof|unexpected EOF during handshake|failed to connect to websocket|error sending request|HTTP request failed/i.test(text);
 }
 

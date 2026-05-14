@@ -2,7 +2,13 @@ import { Bot, type Context } from "grammy";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { findLatestCodexSession, listCodexWorkspaceSessions, type CodexSessionMeta, type CodexStreamEvent } from "./codex.js";
+import {
+  findLatestCodexSession,
+  isTransientCodexNetworkError,
+  listCodexWorkspaceSessions,
+  type CodexSessionMeta,
+  type CodexStreamEvent
+} from "./codex.js";
 import { ProcessLock } from "./lock.js";
 import type { CodexClient } from "./codex.js";
 import type { ConfigStore, StateStore } from "./storage.js";
@@ -10,6 +16,9 @@ import type { BridgeSession, BridgeState, BridgeStatus, CodexRunResult } from ".
 
 const telegramMessageLimit = 4096;
 const safeChunkSize = 3900;
+const codexNetworkProbeUrl = "https://chatgpt.com/backend-api/codex/responses";
+const networkFailureCooldownMs = 60_000;
+const networkSuccessCacheMs = 30_000;
 
 export interface TelegramBridgeOptions {
   configStore: ConfigStore;
@@ -39,6 +48,9 @@ export class TelegramBridge {
   private readonly lock = new ProcessLock();
   private readonly seenMessages = new Set<string>();
   private botToken?: string;
+  private networkUnavailableUntil = 0;
+  private networkHealthyUntil = 0;
+  private networkProbePromise?: Promise<boolean>;
 
   constructor(private readonly options: TelegramBridgeOptions) {}
 
@@ -96,16 +108,16 @@ export class TelegramBridge {
   private registerHandlers(bot: Bot): void {
     bot.command("start", (ctx) => this.handleStart(ctx));
     bot.command("help", (ctx) => this.withOwner(ctx, () => ctx.reply(helpText())));
-    bot.command("new", (ctx) => this.withOwner(ctx, () => this.enqueue(ctx, () => this.handleNew(ctx))));
+    bot.command("new", (ctx) => this.withOwner(ctx, () => this.enqueueCodex(ctx, () => this.handleNew(ctx))));
     bot.command("list", (ctx) => this.withOwner(ctx, () => this.handleList(ctx)));
     bot.command("switch", (ctx) => this.withOwner(ctx, () => this.handleSwitch(ctx)));
     bot.command("rename", (ctx) => this.withOwner(ctx, () => this.handleRename(ctx)));
     bot.command("current", (ctx) => this.withOwner(ctx, () => this.handleCurrent(ctx)));
     bot.command("status", (ctx) => this.withOwner(ctx, () => this.handleStatus(ctx)));
     bot.command("reset-owner", (ctx) => this.withOwner(ctx, () => this.handleResetOwner(ctx)));
-    bot.on("message:photo", (ctx) => this.withOwner(ctx, () => this.enqueue(ctx, () => this.handlePhoto(ctx))));
-    bot.on("message:document", (ctx) => this.withOwner(ctx, () => this.enqueue(ctx, () => this.handleDocument(ctx))));
-    bot.on("message:text", (ctx) => this.withOwner(ctx, () => this.enqueue(ctx, () => this.handleText(ctx))));
+    bot.on("message:photo", (ctx) => this.withOwner(ctx, () => this.enqueueCodex(ctx, () => this.handlePhoto(ctx))));
+    bot.on("message:document", (ctx) => this.withOwner(ctx, () => this.enqueueCodex(ctx, () => this.handleDocument(ctx))));
+    bot.on("message:text", (ctx) => this.withOwner(ctx, () => this.enqueueCodex(ctx, () => this.handleText(ctx))));
   }
 
   private async handleStart(ctx: Context): Promise<void> {
@@ -144,12 +156,18 @@ export class TelegramBridge {
       const config = await this.options.configStore.read();
       const codex = this.options.codexFactory(config.codexCommand, target.workspace);
       const stream = await TelegramStream.create(ctx);
-      const result = await codex.runNewSession(
-        `Start a new Codex Telegram Bridge conversation in workspace "${target.workspace}". Reply briefly that the session is ready.`,
-        {
-          onEvent: (event) => stream.push(event)
-        }
+      const result = await runCodexWithStream(
+        stream,
+        () =>
+          codex.runNewSession(
+            `Start a new Codex Telegram Bridge conversation in workspace "${target.workspace}". Reply briefly that the session is ready.`,
+            {
+              onEvent: (event) => stream.push(event)
+            }
+          ),
+        (error) => this.noteCodexFailure(error)
       );
+      if (!result) return;
       await this.options.stateStore.update((state) => {
         const current = state.sessions[session.key] || session;
         const updated = touchSession({ ...current, codexSessionId: result.sessionId || current.codexSessionId });
@@ -290,10 +308,13 @@ export class TelegramBridge {
       const codex = this.options.codexFactory(config.codexCommand, current.workspace || config.defaultWorkspace);
 
       const stream = await TelegramStream.create(ctx);
-      const result = await runCodexWithStream(stream, () =>
-        current.codexSessionId
-          ? codex.resumeSession(current.codexSessionId, prompt, { onEvent: (event) => stream.push(event) })
-          : codex.runNewSession(prompt, { onEvent: (event) => stream.push(event) })
+      const result = await runCodexWithStream(
+        stream,
+        () =>
+          current.codexSessionId
+            ? codex.resumeSession(current.codexSessionId, prompt, { onEvent: (event) => stream.push(event) })
+            : codex.runNewSession(prompt, { onEvent: (event) => stream.push(event) }),
+        (error) => this.noteCodexFailure(error)
       );
       if (!result) return;
 
@@ -348,8 +369,13 @@ export class TelegramBridge {
           imagePaths: [imagePath],
           onEvent: (event: CodexStreamEvent) => stream.push(event)
         };
-        const result = await runCodexWithStream(stream, () =>
-          current.codexSessionId ? codex.resumeSession(current.codexSessionId, prompt, runOptions) : codex.runNewSession(prompt, runOptions)
+        const result = await runCodexWithStream(
+          stream,
+          () =>
+            current.codexSessionId
+              ? codex.resumeSession(current.codexSessionId, prompt, runOptions)
+              : codex.runNewSession(prompt, runOptions),
+          (error) => this.noteCodexFailure(error)
         );
         if (!result) return;
 
@@ -489,6 +515,53 @@ export class TelegramBridge {
     queue.tail = run;
     this.queues.set(chatId, queue);
     return run;
+  }
+
+  private async enqueueCodex(ctx: Context, task: () => Promise<void>): Promise<void> {
+    if (!(await this.ensureCodexNetworkAvailable(ctx))) return;
+    return this.enqueue(ctx, task);
+  }
+
+  private async ensureCodexNetworkAvailable(ctx: Context): Promise<boolean> {
+    const now = Date.now();
+    if (now < this.networkUnavailableUntil) {
+      await replyNetworkUnavailable(ctx, this.networkUnavailableUntil - now);
+      return false;
+    }
+    if (now < this.networkHealthyUntil) {
+      return true;
+    }
+
+    const available = await this.probeCodexNetwork();
+    if (available) {
+      this.networkHealthyUntil = Date.now() + networkSuccessCacheMs;
+      return true;
+    }
+
+    this.markNetworkUnavailable();
+    await replyNetworkUnavailable(ctx, networkFailureCooldownMs);
+    return false;
+  }
+
+  private async probeCodexNetwork(): Promise<boolean> {
+    if (!this.networkProbePromise) {
+      this.networkProbePromise = probeCodexNetwork().finally(() => {
+        this.networkProbePromise = undefined;
+      });
+    }
+    return this.networkProbePromise;
+  }
+
+  private noteCodexFailure(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isTransientCodexNetworkError(message)) {
+      this.markNetworkUnavailable();
+    }
+  }
+
+  private markNetworkUnavailable(): void {
+    this.networkUnavailableUntil = Date.now() + networkFailureCooldownMs;
+    this.networkHealthyUntil = 0;
   }
 }
 
@@ -789,10 +862,15 @@ function truncateForStream(text: string, maxChars: number): string {
   return `${normalized.slice(0, maxChars - 20)}\n...`;
 }
 
-async function runCodexWithStream(stream: TelegramStream, run: () => Promise<CodexRunResult>): Promise<CodexRunResult | undefined> {
+async function runCodexWithStream(
+  stream: TelegramStream,
+  run: () => Promise<CodexRunResult>,
+  onFailure?: (error: unknown) => void
+): Promise<CodexRunResult | undefined> {
   try {
     return await run();
   } catch (error) {
+    onFailure?.(error);
     await stream.fail(error);
     return undefined;
   }
@@ -814,10 +892,6 @@ function formatCodexRequestError(error: unknown): string {
   return raw;
 }
 
-function isTransientCodexNetworkError(text: string): boolean {
-  return /tls handshake eof|unexpected EOF during handshake|failed to connect to websocket|error sending request|HTTP request failed/i.test(text);
-}
-
 function firstRelevantErrorLine(text: string): string {
   return (
     text
@@ -825,4 +899,34 @@ function firstRelevantErrorLine(text: string): string {
       .map((line) => line.trim())
       .find((line) => /ERROR|tls handshake|websocket|HTTP request failed|unexpected EOF/i.test(line)) || ""
   );
+}
+
+async function replyNetworkUnavailable(ctx: Context, remainingMs: number): Promise<void> {
+  const seconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  await ctx.reply(
+    [
+      "检测到网络异常：这条消息没有发送给 Codex，也没有加入队列。",
+      `请检查代理/网络，约 ${seconds}s 后重试。`
+    ].join("\n")
+  );
+}
+
+export async function probeCodexNetwork(
+  fetchImpl: typeof fetch = fetch,
+  url = codexNetworkProbeUrl,
+  timeoutMs = 3000
+): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await fetchImpl(url, {
+      method: "HEAD",
+      signal: controller.signal
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
 }

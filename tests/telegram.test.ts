@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCommandArgument, splitTelegramMessage } from "../src/telegram.js";
+import { parseCommandArgument, probeCodexNetwork, splitTelegramMessage } from "../src/telegram.js";
 
 describe("telegram helpers", () => {
   it("splits long Telegram messages", () => {
@@ -12,5 +12,17 @@ describe("telegram helpers", () => {
   it("parses command arguments", () => {
     expect(parseCommandArgument("/new project notes")).toBe("project notes");
     expect(parseCommandArgument("/new")).toBe("");
+  });
+
+  it("treats any HTTP response as reachable Codex network", async () => {
+    const fetchImpl = async () => new Response("", { status: 403 });
+    await expect(probeCodexNetwork(fetchImpl as typeof fetch)).resolves.toBe(true);
+  });
+
+  it("treats fetch failures as unavailable Codex network", async () => {
+    const fetchImpl = async () => {
+      throw new Error("tls handshake eof");
+    };
+    await expect(probeCodexNetwork(fetchImpl as typeof fetch)).resolves.toBe(false);
   });
 });
